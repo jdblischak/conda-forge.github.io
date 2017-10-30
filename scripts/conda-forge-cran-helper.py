@@ -6,7 +6,7 @@ Update CRAN R package on conda-forge.
 
 # conda execute
 # env:
-#  - bs4
+#  - beautifulsoup4
 #  - python >=3
 #  - requests
 # channels:
@@ -36,7 +36,7 @@ def get_feedstocks():
     '''
     Return list of conda-forge feedstocks.
     '''
-    url = 'https://raw.githubusercontent.com/conda-forge/conda-forge.github.io/master/feedstocks.html'
+    url = 'https://conda-forge.org/feedstocks/'
     r = requests.get(url)
     assert r.ok, 'Able to download list of feedstocks from conda-forge/conda-forge.github.io'
     bs = bs4.BeautifulSoup(r.text, 'html5lib')
