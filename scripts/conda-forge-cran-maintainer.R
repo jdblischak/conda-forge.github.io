@@ -1,8 +1,20 @@
 #!/usr/bin/env Rscript
 
-# Maintain conda-forge R packages from CRAN.
-#
+"Maintain conda-forge R packages from CRAN.
+Usage:
+conda-forge-cran-maintainer.R [options] [<package>...]
+Options:
+-h --help              Show this screen
+-n --dry-run           Dry run
+-a --all               Update all packages
+-l --limit=<l>         Limit the maximum number of packages to attempt to update [default: 10]
+-p --path=<p>          Path on local machine to save intermediate files
+-r --rerender          Rerender with conda smithy
+Arguments:
+package               Zero or more R packages using conda syntax, e.g. r-ggplot2" -> doc
+
 # Requirements:
+#   R and various packages
 #   conda-build 2
 #   conda-smithy
 #   GITHUB_PAT
@@ -10,12 +22,13 @@
 #
 # To do:
 #
-# * Install separate conda environment like bioconda does (https://github.com/bioconda/bioconda-recipes/blob/master/simulate-travis.py)
 # * Check for already existing Pull Request
 # * Add a filter for maintainers
+# * Install separate conda environment like bioconda does (https://github.com/bioconda/bioconda-recipes/blob/master/simulate-travis.py)
 
 # Packages ---------------------------------------------------------------------
 
+suppressPackageStartupMessages(library("docopt"))
 suppressPackageStartupMessages(library("dplyr"))
 suppressPackageStartupMessages(library("gh"))
 suppressPackageStartupMessages(library("git2r"))
@@ -26,6 +39,13 @@ suppressPackageStartupMessages(library("whisker"))
 suppressPackageStartupMessages(library("yaml"))
 
 # Functions --------------------------------------------------------------------
+
+check_package_name <- function(package) {
+  prefix <- str_sub(package, 1, 2)
+  is_lower <- str_to_lower(package) == package
+  invalid <- package[prefix != "r-" | !is_lower]
+  return(invalid)
+}
 
 obtain_cran_packages <- function(repos = "https://cran.rstudio.com/", ...) {
   cran <- available.packages(repos = repos, ...) %>%
@@ -61,7 +81,7 @@ fork_repo <- function(repo, owner = "conda-forge") {
 
 create_feature_branch <- function(repo, name = "update") {
   stopifnot(class(repo) == "git_repository")
-  git_log <- commits(r)
+  git_log <- commits(repo)
   b <- branch_create(commit = git_log[[1]], name = name)
   checkout(b)
   return(b)
@@ -211,77 +231,88 @@ submit_pull_request <- function(owner, repo, title, head, base, body,
   return(pr)
 }
 
+# Main -------------------------------------------------------------------------
+
+main <- function(package = NULL, dry_run = FALSE, all = FALSE, limit = 10,
+                 path = NULL, rerender = FALSE) {
+  cran <- obtain_cran_packages()
+  anaconda <- obtain_anaconda_packages()
+  conda_forge <- merge(anaconda, cran, by = "package",
+                       suffixes = c(".conda", ".cran")) %>%
+    mutate(outdated = version.conda < version.cran)
+  cat(sprintf("%d of %d CRAN R packages on conda-forge are outdated.\n",
+              sum(conda_forge$outdated), nrow(conda_forge)))
+
+  login <- gh_whoami()
+
+  if (all) {
+    package <- sort(unique(c(package, conda_forge$package[conda_forge$outdated])))
+  }
+  if (is.null(path)) {
+    path <- tempdir()
+  }
+  package <- package[seq_len(min(length(package), limit))]
+
+  if (dry_run) {
+    cat(sprintf("Dry run mode: The following package(s) would be updated: %s\n\n", package))
+    return(invisible())
+  }
+
+  for (pkg in package) {
+    cat(sprintf("Processing %s\n", pkg))
+    feedstock <- paste0(pkg, "-feedstock")
+    fork <- fork_repo(feedstock)
+    r <- clone(fork$ssh_url, local_path = file.path(path, fork$name))
+    b <- create_feature_branch(r)
+    if (rerender) {
+      conda_smithy <- rerender_feedstock(workdir(r))
+    }
+    recipe_old <- file.path(workdir(r), "recipe", "meta.yaml")
+    recipe_old_info <- get_recipe_info(recipe_old)
+    if (conda_forge$outdated[conda_forge$package == pkg]) {
+      recipe_new <- create_cran_recipe(pkg, path)
+      recipe_new_info <- get_recipe_info(recipe_new)
+      update_cran_recipe(recipe_old, recipe_old_info, recipe_new_info)
+      commit_cran_recipe(r)
+      update <- TRUE
+    } else {
+      update <- FALSE
+    }
+    # Only push and pull request if new commits have been made
+    if (branch_target(b) != branch_target(branches(r)$master)) {
+      push(r, name = "origin", refspec = paste0("refs/heads/", b@name))
+      if (update) {
+        pr_message <- create_pr_message(rerender = rerender, update = update,
+                                        old_info = recipe_old_info,
+                                        new_info = recipe_new_info)
+      } else {
+        pr_message <- create_pr_message(rerender = rerender, update = FALSE,
+                                        old_info = recipe_old_info)
+      }
+      pr <- submit_pull_request(owner = "jdblischak", repo = feedstock,
+                                title = "MNT: Update package version",
+                                head = paste(login$login, b@name, sep = ":"),
+                                base = "master",
+                                body = pr_message)
+    }
+  }
+
+}
+
 # Arguments --------------------------------------------------------------------
 
-packages <- "r-anomalydetection"
-maintainers <- "jdblischak"
-all <- FALSE
-limit <- 10
-dry_run <- TRUE
-cb2_path <- "/tmp/cb2"
-local_path <- NULL
-rerender <- TRUE
-
-# Script -----------------------------------------------------------------------
-
-cran <- obtain_cran_packages()
-anaconda <- obtain_anaconda_packages()
-conda_forge <- merge(anaconda, cran, by = "package",
-                     suffixes = c(".conda", ".cran")) %>%
-  mutate(outdated = version.conda < version.cran)
-cat(sprintf("%d of %d CRAN R packages on conda-forge are outdated.\n",
-            sum(conda_forge$outdated), nrow(conda_forge)))
-
-login <- gh_whoami()
-
-if (all) {
-  packages <- sort(unique(c(packages, conda_forge$package[conda_forge$outdated])))
-}
-if (is.null(local_path)) {
-  local_path <- tempdir()
-}
-packages <- packages[seq_len(min(length(packages), limit))]
-
-for (pkg in packages) {
-  cat(sprintf("Processing %s\n", pkg))
-  feedstock <- paste0(pkg, "-feedstock")
-  fork <- fork_repo(feedstock)
-  r <- clone(fork$ssh_url, local_path = file.path(local_path, fork$name))
-  b <- create_feature_branch(r)
-  if (rerender) {
-    conda_smithy <- rerender_feedstock(workdir(r))
+if (!interactive()) {
+  opts <- docopt(doc)
+  invalid <- check_package_name(opts$package)
+  if (length(invalid) > 0) {
+    cat(sprintf("Package names must be lowercase and start with r-. The following are invalid: %s\n\n",
+                paste(invalid, collapse = " ")))
+    docopt(doc, "-h")
   }
-  recipe_old <- file.path(workdir(r), "recipe", "meta.yaml")
-  recipe_old_info <- get_recipe_info(recipe_old)
-  if (conda_forge$outdated[conda_forge$package == pkg]) {
-    recipe_new <- create_cran_recipe(pkg, local_path)
-    recipe_new_info <- get_recipe_info(recipe_new)
-    update_cran_recipe(recipe_old, recipe_old_info, recipe_new_info)
-    commit_cran_recipe(r)
-    update <- TRUE
-  } else {
-    update <- FALSE
-  }
-  # Only push and pull request if new commits have been made
-  if (branch_target(b) != branch_target(branches(r)$master)) {
-    push(r, name = "origin", refspec = paste0("refs/heads/", b@name))
-    if (update) {
-      pr_message <- create_pr_message(rerender = rerender, update = update,
-                                      old_info = recipe_old_info,
-                                      new_info = recipe_new_info)
-    } else {
-      pr_message <- create_pr_message(rerender = rerender, update = FALSE,
-                                      old_info = recipe_old_info)
-    }
-    pr <- submit_pull_request(owner = "jdblischak", repo = feedstock,
-                              title = "MNT: Update package version",
-                              head = paste(login$login, b@name, sep = ":"),
-                              base = "master",
-                              body = pr_message)
-  }
+  main(package = opts$package,
+       dry_run = opts$`dry-run`,
+       all = opts$all,
+       limit = as.numeric(opts$limit),
+       path = opts$path,
+       rerender = opts$rerender)
 }
-
-# if (!interactive()) {
-#   args <- commandArgs(trailingOnly = TRUE)
-#   main(args)
-# }
