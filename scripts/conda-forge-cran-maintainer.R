@@ -24,6 +24,8 @@ package               Zero or more R packages using conda syntax, e.g. r-ggplot2
 #
 # * Check for already existing Pull Request
 # * Add a filter for maintainers
+# * Add a filter to only update recipes whose explicitly-listed R dependencies
+#   are not outdated
 # * Install separate conda environment like bioconda does (https://github.com/bioconda/bioconda-recipes/blob/master/simulate-travis.py)
 
 # Packages ---------------------------------------------------------------------
@@ -206,7 +208,7 @@ Notes:
 * The CRAN entry notes the following system requirements: {{reqs_system_note}}
 {{/reqs_systems_note_flag}}
 "
-  data <- list(maintainers = paste0(c("m1", "m2", "m3"), collapse = ", "), #paste0("@", old_info$maintainers),
+  data <- list(maintainers = paste0("@", old_info$maintainers, collapse = ", "),
                rerender = rerender,
                update = update,
                reqs_build_lost =  paste0(reqs_build_lost, collapse = ", "),
@@ -223,6 +225,7 @@ Notes:
   return(text)
 }
 
+# https://developer.github.com/v3/pulls/#create-a-pull-request
 submit_pull_request <- function(owner, repo, title, head, base, body,
                                 maintainer_can_modify = TRUE) {
   pr <- gh("POST /repos/:owner/:repo/pulls", owner = owner, repo = repo,
@@ -289,7 +292,7 @@ main <- function(package = NULL, dry_run = FALSE, all = FALSE, limit = 10,
         pr_message <- create_pr_message(rerender = rerender, update = FALSE,
                                         old_info = recipe_old_info)
       }
-      pr <- submit_pull_request(owner = "jdblischak", repo = feedstock,
+      pr <- submit_pull_request(owner = "conda-forge", repo = feedstock,
                                 title = "MNT: Update package version",
                                 head = paste(login$login, b@name, sep = ":"),
                                 base = "master",
